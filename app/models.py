@@ -27,12 +27,12 @@ class Role(db.Model):
 		roles = {
 			'User': (Permission.FOLLOW |
 					 Permission.COMMENT |
-					 Permission.WRITE_ARTICLES,True),
+					 Permission.WRITE_ARTICLES, True),
 			'Moderator': (Permission.FOLLOW |
 						  Permission.COMMENT |
 						  Permission.WRITE_ARTICLES |
-						  Permission.MODERATE_COMMENTS ,False),
-			'Administrator': (0xff,False)
+						  Permission.MODERATE_COMMENTS, False),
+			'Administrator': (0xff, False)
 		}
 		for r in roles:
 			role = Role.query.filter_by(name=r).first()
@@ -43,19 +43,19 @@ class Role(db.Model):
 			db.session.add(role)
 		db.session.commit()
 
-	def add_permission(self, perm):
-		if not self.has_permission(perm):
-			self.permissions += perm
+	def add_permission(self, permissions):
+		if not self.has_permission(permissions):
+			self.permissions += permissions
 
-	def remove_permission(self, perm):
-		if self.has_permission(perm):
-			self.permissions -= perm
+	def remove_permission(self, permissions):
+		if self.has_permission(permissions):
+			self.permissions -= permissions
 
 	def reset_permissions(self):
 		self.permissions = 0
 
-	def has_permission(self,perm):
-		return self.permissions & perm == perm
+	def has_permission(self,permissions):
+		return self.permissions & permissions == permissions
 
 	def __repr__(self):
 		return '<Role %r>' % self.name
@@ -94,6 +94,15 @@ class User(UserMixin,db.Model):
 								backref=db.backref('followed', lazy='joined'),
 								lazy='dynamic',
 								cascade='all,delete-orphan')
+	comments = db.relationship('Comment', backref='author', lazy='dynamic')
+
+	@staticmethod
+	def add_self_follows():
+		for user in User.query.all():
+			if not user.is_following(user):
+				user.follow(user)
+				db.session.add(user)
+				db.session.commit()
 
 	def __init__(self, **kwargs):
 		super(User, self).__init__(**kwargs)
@@ -102,13 +111,16 @@ class User(UserMixin,db.Model):
 				self.role = Role.query.filter_by(permissions=0xff).first()
 			if self.role is None:
 				self.role = Role.query.filter_by(default=True).first()
-			if self.email is not None and self.avatar_hash is None:
-				self.avatar_hash = hashlib.md5(
-					self.email.encode('utf-8')).hexdigest()
+		if self.email is not None and self.avatar_hash is None:
+			self.avatar_hash = hashlib.md5(
+				self.email.encode('utf-8')).hexdigest()
+		self.follow(self)
+
 
 	@property
 	def password(self):
 		raise AttributeError('password is not a readable attribute')
+
 
 	@password.setter
 	def password(self,password):
@@ -234,6 +246,13 @@ class User(UserMixin,db.Model):
 			return False
 		return  self.followers.filter_by(follower_id=user.id).first() is not None
 
+	@property
+	def followed_posts(self):
+		return Post.query.join(Follow, Follow.followed_id == Post.author_id)\
+			.filter(Follow.follower_id == self.id)
+		#return db.session.query(Post).select_from(Follow).\
+		#	filter_by(follower_id = self.id).\
+		#	join(Post,Follow.followed_id == Post.author_id) 
 
 	def __repr__(self):
 		return '<User %r' % self.username
@@ -253,11 +272,13 @@ def load_user(user_id):
 	return User.query.get(int(user_id))
 
 class Post(db.Model):
+	__tablename__ = 'posts'
 	id = db.Column(db.Integer,primary_key=True)
 	body = db.Column(db.Text)
 	timestamp = db.Column(db.DateTime, index=True, default=datetime.utcnow)
 	author_id = db.Column(db.Integer, db.ForeignKey('users.id'))
 	body_html = db.Column(db.Text)
+	comments = db.relationship('Comment', backref='post', lazy='dynamic')
 
 	@staticmethod
 	def generate_fake(count=100):
@@ -283,4 +304,24 @@ class Post(db.Model):
 			tags=allowed_tags, strip=True))
 
 db.event.listen(Post.body, 'set', Post.on_changed_body)
+
+class Comment(db.Model):
+	__tablename__ = 'comments'
+	id = db.Column(db.Integer, primary_key=True)
+	body = db.Column(db.Text)
+	body_html = db.Column(db.Text)
+	timestamp = db.Column(db.DateTime, index=True, default=datetime.utcnow)
+	disabled = db.Column(db.Boolean)
+	author_id = db.Column(db.Integer, db.ForeignKey('users.id'))
+	post_id = db.Column(db.Integer, db.ForeignKey('posts.id'))
+
+	@staticmethod
+	def on_changed_body(target, value, oldvalue, initiator):
+		allowed_tags = ['a', 'abbr', 'acronym', 'b', 'code', 'em', 'i', 
+						'strong']
+		target.body_html = bleach.linkify(bleach.clean(
+			markdown(value, output_format='html'),
+			tags=allowed_tags, strip=True))
+
+db.event.listen(Comment.body, 'set', Comment.on_changed_body)
 
